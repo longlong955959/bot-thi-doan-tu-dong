@@ -1,31 +1,52 @@
-name: Tự Động Săn Đề & Bắn Messenger
+# .github/workflows/run.yml
+name: Doan Quiz Bot
 
 on:
   schedule:
-    - cron: '30 0,6 * * *' # Chạy 7:30 sáng và 13:30 chiều hàng ngày
+    - cron: "30 0 * * *"   # 07:30 GMT+7
+    - cron: "30 6 * * *"   # 13:30 GMT+7
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: doan-bot
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-      - run: npm install
-      - env:
+          node-version: 20
+
+      - name: Install
+        run: npm install --no-audit --no-fund --loglevel=error
+
+      - name: Run bot
+        env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FB_APPSTATE: ${{ secrets.FB_APPSTATE }}
           THREAD_ID: ${{ secrets.THREAD_ID }}
-          WEB_URL: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          WEB_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
         run: node bot.js
-      - run: |
-          git config --global user.name "Bot"
-          git config --global user.email "bot@github.com"
-          git add last_quiz.txt data.json de_cuong.txt || true
-          git diff --staged --quiet || git commit -m "Cập nhật dữ liệu tự động"
-          git push
+
+      - name: Commit & push
+        if: ${{ !cancelled() }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data.json last_quiz.txt
+          if git diff --cached --quiet; then
+            echo "Không có thay đổi"
+            exit 0
+          fi
+          git commit -m "chore: cập nhật đáp án $(TZ=Asia/Ho_Chi_Minh date +'%d/%m %H:%M')"
+          for i in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME" && git push && break || sleep 5
+          done
