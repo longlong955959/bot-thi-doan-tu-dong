@@ -1,4 +1,3 @@
-
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -9,24 +8,38 @@ const pdfParse = require("pdf-parse/lib/pdf-parse.js");
 const mammoth = require("mammoth");
 const { GoogleGenerativeAI, SchemaType } = require("@google/generative-ai");
 
+/* ---------- Cấu hình ---------- */
+const ROOT = __dirname;
+const SCAN_ALL = process.env.SCAN_ALL === "true";
 const CFG = {
   model: "gemini-2.5-flash",
-  lastFile: "last_quiz.txt",
-  dataFile: "data.json",
-  query: "đáp án cuộc thi tìm hiểu đoàn thanh niên tuần",
-  localDirs: [".", "de_cuong"],
+  lastFile: path.join(ROOT, "last_quiz.txt"),
+  dataFile: path.join(ROOT, "data.json"),
+  localDirs: [ROOT, path.join(ROOT, "de_cuong")],
   chunkSize: 30000,
   maxChunks: 12,
-  keepIds: 100,
-  newsPerRun: 2,
+  keepIds: 300,
+  newsPerRun: SCAN_ALL ? 15 : 2,
   msgSplit: 3500,
   msgLimit: Number(process.env.MSG_MAX_QUESTIONS) || 80,
+  geminiGap: Number(process.env.GEMINI_GAP_MS) || 7000, // gói free ~10 lượt/phút
 };
+const QUERIES = SCAN_ALL
+  ? [
+      "đáp án cuộc thi tìm hiểu đoàn thanh niên",
+      "đáp án cuộc thi tìm hiểu đoàn thanh niên tuần",
+      "đáp án cuộc thi trắc nghiệm thanh niên",
+      "đáp án thi tìm hiểu đại hội đoàn",
+      "đáp án thi tìm hiểu tư tưởng Hồ Chí Minh thanh niên",
+      "đáp án cuộc thi trực tuyến tìm hiểu pháp luật thanh niên",
+    ]
+  : ["đáp án cuộc thi tìm hiểu đoàn thanh niên tuần"];
+const rssUrl = (q) =>
+  `https://news.google.com/rss/search?q=${encodeURIComponent(q + (SCAN_ALL ? " when:30d" : " when:14d"))}&hl=vi&gl=VN&ceid=VN:vi`;
 const UA = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
   "Accept-Language": "vi,en;q=0.8",
 };
-const RSS_URL = `https://news.google.com/rss/search?q=${encodeURIComponent(CFG.query + " when:14d")}&hl=vi&gl=VN&ceid=VN:vi`;
 
 /* ---------- Tiện ích ---------- */
 const sha = (s) => crypto.createHash("sha1").update(String(s)).digest("hex").slice(0, 16);
@@ -34,15 +47,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readSafe = (f, d = "") => { try { return fs.readFileSync(f, "utf8"); } catch { return d; } };
 const norm = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/gi, "d").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const clean = (t) => String(t || "").replace(/\r/g, "").replace(/[ \t\u00a0]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-const strip = (s) => String(s || "").replace(/^\s*(?:đáp án\s*:?\s*)?[A-D][\.\):]\s+/i, "").trim();
+const strip = (s) => String(s || "").replace(/^\s*(?:đáp án\s*:?\s*)?[A-D][.):]\s+/i, "").trim();
+const errMsg = (e) => (e instanceof Error ? e.message : typeof e === "string" ? e : (() => { try { return JSON.stringify(e); } catch { return String(e); } })());
+
+function withTimeout(p, ms, label) {
+  let t;
+  return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} quá thời gian`)), ms); })])
+    .finally(() => clearTimeout(t));
+}
 
 async function retry(fn, times = 3, base = 2000, label = "") {
   let err;
   for (let i = 0; i < times; i++) {
     try { return await fn(); } catch (e) {
       err = e;
-      console.warn(`⚠️ ${label} lần ${i + 1}/${times}: ${e.message || e}`);
-      if (i < times - 1) await sleep(base * 2 ** i);
+      const msg = errMsg(e);
+      if (/PerDay|per day/i.test(msg)) { if (e && typeof e === "object") e.fatal = true; throw e; }
+      console.warn(`⚠️ ${label} lần ${i + 1}/${times}: ${msg.slice(0, 200)}`);
+      if (i === times - 1) break;
+      let d = base * 2 ** i;
+      const m = /retry in ([\d.]+)\s*s/i.exec(msg);
+      if (m) d = Math.max(d, (Number(m[1]) + 1) * 1000);
+      else if (/429|quota|exhausted/i.test(msg)) d = Math.max(d, 20000);
+      await sleep(Math.min(d, 90000));
     }
   }
   throw err;
@@ -100,11 +127,11 @@ async function localSources(done) {
       const file = path.join(dir, n);
       try {
         const text = clean(await extractFile(file));
-        if (text.length < 50) { console.warn(`⚠️ ${file}: không trích xuất được văn bản (PDF scan?)`); continue; }
+        if (text.length < 50) { console.warn(`⚠️ ${n}: không trích xuất được văn bản (PDF scan?)`); continue; }
         const id = `file:${n}:${sha(text)}`;
         if (done.has(id)) continue;
         out.push({ id, kind: "file", title: n, text });
-      } catch (e) { console.error(`Lỗi đọc ${file}:`, e.message); }
+      } catch (e) { console.error(`Lỗi đọc ${n}:`, errMsg(e)); }
     }
   }
   const pri = (s) => Number(/^de_cuong/i.test(s.title));
@@ -116,12 +143,19 @@ async function decodeGoogleNews(link) {
   const u = new URL(link);
   if (u.hostname !== "news.google.com") return link;
   const id = u.pathname.split("/").pop();
-  const page = await axios.get(`https://news.google.com/rss/articles/${id}?hl=vi&gl=VN&ceid=VN:vi`, {
-    headers: { ...UA, Cookie: "CONSENT=YES+cb" }, timeout: 20000, responseType: "text",
-  });
-  const el = cheerio.load(page.data)("[data-n-a-sg]").first();
-  const sg = el.attr("data-n-a-sg"), ts = el.attr("data-n-a-ts");
-  if (!sg || !ts) return link;
+  let sg, ts;
+  for (const base of ["https://news.google.com/rss/articles/", "https://news.google.com/articles/"]) {
+    try {
+      const page = await axios.get(`${base}${id}?hl=vi&gl=VN&ceid=VN:vi`, {
+        headers: { ...UA, Cookie: "CONSENT=YES+cb" }, timeout: 20000, responseType: "text",
+      });
+      const el = cheerio.load(page.data)("[data-n-a-sg]").first();
+      sg = el.attr("data-n-a-sg");
+      ts = el.attr("data-n-a-ts");
+      if (sg && ts) break;
+    } catch { /* thử URL kế tiếp */ }
+  }
+  if (!sg || !ts) throw new Error("không giải mã được link Google News");
   const inner = JSON.stringify(["garturlreq", [["X", "X", ["X", "X"], null, null, 1, 1, "US:en", null, 1, null, null, null, null, null, 0, 1], "X", "X", 1, [1, 1, 1], 1, 1, null, 0, 0, null, 0], id, Number(ts), sg]);
   const body = "f.req=" + encodeURIComponent(JSON.stringify([[["Fbv4je", inner, null, "generic"]]]));
   const res = await axios.post("https://news.google.com/_/DotsSplashUi/data/batchexecute", body, {
@@ -130,7 +164,8 @@ async function decodeGoogleNews(link) {
   });
   const parsed = JSON.parse(String(res.data).split("\n\n")[1]);
   const url = JSON.parse(parsed[0][2])[1];
-  return /^https?:\/\//.test(url) ? url : link;
+  if (!/^https?:\/\//.test(url)) throw new Error("link giải mã không hợp lệ");
+  return url;
 }
 
 async function fetchArticle(url) {
@@ -144,33 +179,43 @@ async function fetchArticle(url) {
 }
 
 async function newsSources(done) {
-  try {
-    const { data } = await retry(() => axios.get(RSS_URL, { headers: UA, timeout: 20000, responseType: "text" }), 3, 1500, "RSS");
-    const $ = cheerio.load(data, { xmlMode: true });
-    const items = $("item").map((_, e) => ({
-      title: $(e).find("title").first().text().trim(),
-      link: $(e).find("link").first().text().trim(),
-      date: Date.parse($(e).find("pubDate").first().text()) || 0,
-      desc: cheerio.load($(e).find("description").first().text()).text().trim(),
-    })).get().filter((i) => i.link && i.title && /dap an|cau hoi|tim hieu/.test(norm(i.title)))
-      .sort((a, b) => b.date - a.date);
-
-    const out = [];
-    for (const it of items) {
-      if (out.length >= CFG.newsPerRun) break;
-      const id = "news:" + sha(it.link);
-      if (done.has(id)) continue;
-      let body = "";
-      try { body = await fetchArticle(await decodeGoogleNews(it.link)); } catch (e) { console.warn("⚠️ Không tải được bài gốc:", e.message); }
-      const text = (it.title + "\n" + (body.length > 300 ? body : it.desc)).slice(0, 150000);
-      if (text.length < 300) { console.log(`⏳ Bỏ qua (nội dung quá ngắn, thử lại lần sau): ${it.title}`); continue; }
-      out.push({ id, kind: "news", title: it.title, text });
-    }
-    return out;
-  } catch (e) {
-    console.error("Lỗi quét RSS:", e.message);
-    return [];
+  const seen = new Map();
+  for (const q of QUERIES) {
+    try {
+      const { data } = await retry(() => axios.get(rssUrl(q), { headers: UA, timeout: 20000, responseType: "text" }), 3, 1500, "RSS");
+      const $ = cheerio.load(data, { xmlMode: true });
+      $("item").each((_, e) => {
+        const link = $(e).find("link").first().text().trim();
+        const title = $(e).find("title").first().text().trim();
+        if (!link || !title || seen.has(link)) return;
+        if (!/dap an|cau hoi|tim hieu|cuoc thi/.test(norm(title))) return;
+        seen.set(link, {
+          title, link,
+          date: Date.parse($(e).find("pubDate").first().text()) || 0,
+          desc: cheerio.load($(e).find("description").first().text()).text().trim(),
+        });
+      });
+    } catch (e) { console.error(`Lỗi quét RSS "${q}":`, errMsg(e)); }
+    await sleep(800);
   }
+  const items = [...seen.values()].sort((a, b) => b.date - a.date);
+  console.log(`📡 Tìm thấy ${items.length} bài viết liên quan.`);
+
+  const out = [];
+  let tried = 0;
+  for (const it of items) {
+    if (out.length >= CFG.newsPerRun || tried >= CFG.newsPerRun * 3) break;
+    const id = "news:" + sha(it.link);
+    if (done.has(id)) continue;
+    tried++;
+    let body = "";
+    try { body = await fetchArticle(await decodeGoogleNews(it.link)); } catch (e) { console.warn("⚠️ Không tải được bài gốc:", errMsg(e)); }
+    const text = (it.title + "\n" + (body.length > 300 ? body : it.desc)).slice(0, 150000);
+    if (text.length < 300) { console.log(`⏳ Bỏ qua (nội dung quá ngắn, thử lại lần sau): ${it.title}`); continue; }
+    out.push({ id, kind: "news", title: it.title, text });
+    await sleep(500);
+  }
+  return out;
 }
 
 /* ---------- Gemini ---------- */
@@ -197,10 +242,17 @@ const SCHEMA = {
 
 function parseJSON(raw) {
   const t = String(raw).replace(/```json|```/g, "").trim();
-  try { return JSON.parse(t); } catch {}
+  try { return JSON.parse(t); } catch { /* thử cách khác */ }
   const m = t.match(/\{[\s\S]*\}/);
   if (m) return JSON.parse(m[0]);
   throw new Error("JSON không hợp lệ");
+}
+
+let lastGemini = 0;
+async function throttle() {
+  const w = lastGemini + CFG.geminiGap - Date.now();
+  if (w > 0) await sleep(w);
+  lastGemini = Date.now();
 }
 
 async function ask(model, title, text, i, n) {
@@ -217,6 +269,7 @@ Không có câu hỏi nào: questionBank=[] và messengerText="".
 
 NỘI DUNG:
 ${text}`;
+  await throttle();
   const res = await model.generateContent(prompt);
   const j = parseJSON(res.response.text());
   const bank = (Array.isArray(j.questionBank) ? j.questionBank : [])
@@ -256,10 +309,13 @@ async function analyze(src) {
       r.bank.forEach((x) => map.set(norm(x.q), x));
       if (r.text) texts.push(r.text);
       ok++;
-    } catch (e) { console.error(`❌ Bỏ qua phần ${i + 1}:`, e.message || e); }
-    if (i < chunks.length - 1) await sleep(1500);
+    } catch (e) {
+      if (e && e.fatal) throw e;
+      console.error(`❌ Bỏ qua phần ${i + 1}:`, errMsg(e));
+    }
   }
   if (!ok) throw new Error("Gemini lỗi toàn bộ các phần");
+  if (ok < chunks.length) console.warn(`⚠️ Chỉ xử lý được ${ok}/${chunks.length} phần.`);
   return { bank: [...map.values()], texts };
 }
 
@@ -270,13 +326,18 @@ function buildMessage(src, bank, texts) {
   let t = texts.map((x, i) => (i ? x.split("\n").slice(1).join("\n") : x)).join("\n").trim();
   if (!t) t = `📚 ${src.title}\n` + bank.map((x) => `🔑 ${x.kw || x.q} ➜ ✅ ${x.a}${x.s === "ai" ? " ⚠️" : ""}`).join("\n");
   if (bank.some((x) => x.s === "ai")) t += "\n\n⚠️ = AI suy luận, nên đối chiếu lại với tài liệu.";
-  return t + "\n" + web;
+  return t + web;
 }
 
 function splitText(t, max) {
   const out = [];
   let cur = "";
-  for (const line of t.split("\n")) {
+  for (let line of t.split("\n")) {
+    while (line.length > max) { // dòng quá dài: cắt cứng
+      if (cur) { out.push(cur.trim()); cur = ""; }
+      out.push(line.slice(0, max));
+      line = line.slice(max);
+    }
     if (cur && cur.length + line.length + 1 > max) { out.push(cur.trim()); cur = ""; }
     cur += line + "\n";
   }
@@ -285,23 +346,24 @@ function splitText(t, max) {
 }
 
 function parseAppState(raw) {
-  let s = raw.trim();
-  if (!s.startsWith("[")) s = Buffer.from(s, "base64").toString("utf8");
+  let s = String(raw).trim();
+  if (!s.startsWith("[")) s = Buffer.from(s, "base64").toString("utf8").trim();
   const j = JSON.parse(s);
   if (!Array.isArray(j)) throw new Error("FB_APPSTATE phải là mảng JSON");
   return j;
 }
 
 function fbLogin(appState) {
-  return new Promise((resolve, reject) => {
-    const mod = require("ws3-fca");
-    const login = typeof mod === "function" ? mod : mod.login || mod.default;
-    if (typeof login !== "function") return reject(new Error("ws3-fca: không tìm thấy hàm login"));
-    const timer = setTimeout(() => reject(new Error("Đăng nhập Facebook quá thời gian")), 60000);
-    login({ appState }, (err, api) => { clearTimeout(timer); err ? reject(err) : resolve(api); });
-  });
+  const mod = require("ws3-fca");
+  const login = typeof mod === "function" ? mod : mod.login || mod.default;
+  if (typeof login !== "function") throw new Error("ws3-fca: không tìm thấy hàm login");
+  return withTimeout(
+    new Promise((res, rej) => login({ appState }, (err, api) => (err ? rej(err) : res(api)))),
+    60000, "Đăng nhập Facebook"
+  );
 }
-const fbSend = (api, text, tid) => new Promise((res, rej) => api.sendMessage(text, tid, (e) => (e ? rej(e) : res())));
+const fbSend = (api, text, tid) =>
+  withTimeout(new Promise((res, rej) => api.sendMessage(text, tid, (e) => (e ? rej(e) : res()))), 40000, "Gửi tin");
 
 async function sendMessenger(text) {
   const { FB_APPSTATE, THREAD_ID } = process.env;
@@ -325,18 +387,22 @@ async function sendMessenger(text) {
 async function processSource(src, history) {
   console.log(`🔎 Xử lý: ${src.title}`);
   const { bank, texts } = await analyze(src);
-  if (!bank.length) { console.log("ℹ️ AI không tìm thấy câu hỏi nào."); return markDone(src, history); }
+  if (!bank.length) { console.log("ℹ️ AI không tìm thấy câu hỏi nào."); markDone(src, history); return null; }
 
   const st = mergeData(bank, src);
   console.log(`💾 data.json: ${bank.length} câu từ nguồn này, tổng ${st.total}`);
 
+  if (SCAN_ALL) { markDone(src, history); return { title: src.title, n: bank.length }; }
+
   if (src.kind === "news" && st.dup >= 0.8) {
     console.log("♻️ Nội dung đã có từ nguồn khác, không gửi lại.");
-    return markDone(src, history);
+    markDone(src, history);
+    return null;
   }
   const r = await sendMessenger(buildMessage(src, bank, texts));
   console.log(r === "skip" ? "⚠️ Thiếu FB_APPSTATE/THREAD_ID: chỉ cập nhật Web." : "✅ Đã gửi Messenger.");
   markDone(src, history);
+  return null;
 }
 
 async function main() {
@@ -345,18 +411,39 @@ async function main() {
   const done = new Set(history);
 
   let sources = await localSources(done);
-  if (!sources.length) sources = await newsSources(done);
+  if (SCAN_ALL || !sources.length) sources = sources.concat(await newsSources(done));
   if (!sources.length) return console.log("⏭️ Không có nguồn mới.");
   if (!process.env.GEMINI_API_KEY) throw new Error("Thiếu GEMINI_API_KEY");
 
+  const summary = [];
   for (const src of sources) {
-    try { await processSource(src, history); } catch (e) {
-      console.error(`❌ Lỗi với "${src.title}":`, e.message || e);
+    try {
+      const r = await processSource(src, history);
+      if (r) summary.push(r);
+    } catch (e) {
+      console.error(`❌ Lỗi với "${src.title}":`, errMsg(e));
+      process.exitCode = 1;
+      if (e && e.fatal) { console.error("⛔ Hết hạn mức Gemini trong ngày, dừng."); break; }
+    }
+  }
+
+  if (SCAN_ALL && summary.length) {
+    const web = process.env.WEB_URL ? `\n🌐 Tra cứu: ${process.env.WEB_URL}` : "";
+    const msg = `📚 Đã quét ${summary.length} cuộc thi/đề mới:\n` +
+      summary.map((s, i) => `${i + 1}. ${s.title} (${s.n} câu)`).join("\n") + web;
+    try {
+      console.log((await sendMessenger(msg)) === "skip" ? "⚠️ Thiếu FB: chỉ cập nhật Web." : "✅ Đã gửi tin tổng hợp.");
+    } catch (e) {
+      console.error("Lỗi gửi Messenger:", errMsg(e));
       process.exitCode = 1;
     }
   }
 }
 
-main()
-  .catch((e) => { console.error("❌ Lỗi:", e.message || e); process.exitCode = 1; })
-  .finally(() => setTimeout(() => process.exit(process.exitCode || 0), 300));
+if (require.main === module) {
+  main()
+    .catch((e) => { console.error("❌ Lỗi:", errMsg(e)); process.exitCode = 1; })
+    .finally(() => setTimeout(() => process.exit(process.exitCode || 0), 300));
+} else {
+  module.exports = { norm, clean, strip, chunkText, splitText, mergeData, parseAppState, buildMessage, retry, main };
+}
