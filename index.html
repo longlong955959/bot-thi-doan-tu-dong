@@ -1,89 +1,139 @@
+<!-- index.html -->
 <!DOCTYPE html>
 <html lang="vi">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tra Cứu Đáp Án Thi Đoàn - Chống Đảo Đề</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1d4ed8">
+<title>Tra cứu đáp án Đoàn</title>
+<script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-slate-900 text-slate-100 min-h-screen p-4 font-sans">
-  <div class="max-w-xl mx-auto space-y-4">
-    <div class="bg-blue-600 p-4 rounded-2xl shadow-lg flex justify-between items-center">
-      <div>
-        <h1 class="text-lg font-bold">⚡ Tra Cứu Thi Đoàn (Chống Đảo Đề)</h1>
-        <p class="text-xs text-blue-200">Gõ 2-3 chữ trong câu hỏi để tìm đáp án ngay!</p>
-      </div>
-      <span id="countBadge" class="bg-blue-900 text-xs px-3 py-1 rounded-full font-bold">0 câu</span>
-    </div>
-
-    <div class="relative flex items-center">
-      <input id="searchInput" type="text" placeholder="Nhập từ khóa câu hỏi..." 
-        class="w-full p-4 pr-24 rounded-2xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-blue-500 text-base" />
-      <button id="clearBtn" class="hidden absolute right-14 text-slate-400 hover:text-white px-2">✕</button>
-      <button id="voiceBtn" class="absolute right-2 bg-blue-600 hover:bg-blue-500 p-2.5 rounded-xl text-white">🎤</button>
-    </div>
-
-    <div id="resultList" class="space-y-3"></div>
+<body class="bg-slate-100 dark:bg-slate-900 text-slate-800 dark:text-slate-100 min-h-screen">
+<div class="max-w-3xl mx-auto p-4">
+  <h1 class="text-2xl font-bold text-blue-700 dark:text-blue-300 text-center">🔎 Tra cứu đáp án Đoàn</h1>
+  <p class="text-center text-xs text-slate-500 mt-1">Tra theo nội dung, không phụ thuộc thứ tự câu hay A/B/C/D</p>
+  <p id="meta" class="text-center text-xs text-slate-400 mb-3">Đang tải dữ liệu...</p>
+  <div class="flex gap-2 sticky top-0 py-2 z-10 bg-slate-100 dark:bg-slate-900">
+    <input id="q" type="search" autocomplete="off" enterkeyhint="search"
+      placeholder="Gõ không dấu / gõ tắt (vd: dtn, ho chi minh, tncs)..."
+      class="flex-1 rounded-xl border border-slate-300 dark:border-slate-600 dark:bg-slate-800 px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500">
+    <button id="mic" class="rounded-xl bg-blue-600 text-white px-4 py-3 hover:bg-blue-700" title="Tìm bằng giọng nói">🎤</button>
   </div>
+  <p id="count" class="text-sm text-slate-500 my-2"></p>
+  <div id="list" class="space-y-3"></div>
+  <button id="more" class="hidden w-full mt-4 rounded-xl bg-slate-200 dark:bg-slate-700 py-3 text-sm">Xem thêm</button>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const norm = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/gi, "d")
+  .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const ini = (s) => norm(s).split(" ").map((w) => w[0] || "").join("");
+const ABBR = { dtn: "doan thanh nien", tn: "thanh nien", tncs: "thanh nien cong san", hcm: "ho chi minh",
+  tnclhcm: "thanh nien cong san ho chi minh", cs: "cong san", vn: "viet nam", tw: "trung uong",
+  dcsvn: "dang cong san viet nam", hlhtn: "hoi lien hiep thanh nien" };
+const PAGE = 30;
+let DATA = [], shown = PAGE, timer;
 
-  <script>
-    let questionBank = [];
-    const searchInput = document.getElementById('searchInput');
-    const resultList = document.getElementById('resultList');
-    const countBadge = document.getElementById('countBadge');
-    const clearBtn = document.getElementById('clearBtn');
-    const voiceBtn = document.getElementById('voiceBtn');
+function h(tag, cls, txt) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (txt !== undefined) e.textContent = txt;
+  return e;
+}
 
-    function removeTones(str) {
-      return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase();
-    }
+function score(d, nq) {
+  if (!nq) return 1;
+  const toks = nq.split(" "), compact = nq.replace(/ /g, "");
+  let s = 0;
+  if (d.nq.includes(nq)) s += 100;
+  if (d.nkw.includes(nq)) s += 70;
+  if (d.na.includes(nq)) s += 50;
+  const hit = toks.filter((t) => d.n.includes(t)).length, r = hit / toks.length;
+  if (r === 1) s += 40 + hit * 5;
+  else if (toks.length >= 3 && r >= 0.6) s += Math.round(r * 30);
+  if (compact.length >= 2 && (d.ini.includes(compact) || d.kwIni.includes(compact))) s += 30;
+  return s;
+}
 
-    async function loadData() {
-      try {
-        const res = await fetch('./data.json?t=' + Date.now());
-        questionBank = await res.json();
-        renderResults('');
-      } catch (e) {
-        resultList.innerHTML = '<p class="text-center text-slate-400">Đang cập nhật dữ liệu từ GitHub...</p>';
-      }
-    }
+function card(d) {
+  const c = h("div", "bg-white dark:bg-slate-800 rounded-xl shadow p-4");
+  c.appendChild(h("div", "font-semibold", d.q));
+  const row = h("div", "mt-2 flex items-start gap-2");
+  row.appendChild(h("div", "flex-1 rounded-lg bg-green-100 dark:bg-green-900/40 text-green-800 dark:text-green-200 font-semibold px-3 py-2", "✅ " + d.a));
+  const cp = h("button", "shrink-0 rounded-lg bg-slate-200 dark:bg-slate-700 px-3 py-2 text-xs", "Chép");
+  cp.onclick = async () => {
+    try { await navigator.clipboard.writeText(d.a); cp.textContent = "Đã chép"; setTimeout(() => (cp.textContent = "Chép"), 1200); } catch (e) {}
+  };
+  row.appendChild(cp);
+  c.appendChild(row);
+  const meta = h("div", "mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs");
+  if (d.kw) meta.appendChild(h("span", "text-blue-600 dark:text-blue-300", "🔑 " + d.kw));
+  if (d.s === "ai") meta.appendChild(h("span", "rounded bg-amber-100 text-amber-800 px-2", "⚠️ AI suy luận, nên đối chiếu"));
+  if (d.title) meta.appendChild(h("span", "text-slate-400", "📄 " + d.title));
+  c.appendChild(meta);
+  const others = (d.opts || []).filter((o) => norm(o) !== d.na);
+  if (others.length) {
+    const det = h("details", "mt-2 text-sm");
+    det.appendChild(h("summary", "cursor-pointer text-slate-500", "Phương án khác (" + others.length + ")"));
+    const ul = h("ul", "mt-1 ml-5 list-disc text-slate-600 dark:text-slate-300");
+    others.forEach((o) => ul.appendChild(h("li", "", o)));
+    det.appendChild(ul);
+    c.appendChild(det);
+  }
+  return c;
+}
 
-    function renderResults(query = '') {
-      const cleanQuery = removeTones(query.trim());
-      clearBtn.classList.toggle('hidden', !query);
+function render() {
+  const nq = norm($("q").value);
+  const exp = nq.split(" ").map((t) => ABBR[t] || t).join(" ");
+  const res = DATA.map((d) => ({ d, s: Math.max(score(d, nq), exp === nq ? 0 : score(d, exp)) }))
+    .filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
+  $("count").textContent = res.length + " / " + DATA.length + " câu";
+  const box = $("list");
+  box.textContent = "";
+  res.slice(0, shown).forEach((x) => box.appendChild(card(x.d)));
+  $("more").classList.toggle("hidden", res.length <= shown);
+}
 
-      const filtered = questionBank.filter(item => {
-        const content = removeTones(`${item.kw || ''} ${item.q} ${item.a}`);
-        return cleanQuery.split(/\s+/).every(word => content.includes(word));
-      });
+async function load() {
+  let j = null;
+  try {
+    const r = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) throw new Error("http " + r.status);
+    j = await r.json();
+    try { localStorage.setItem("dq_cache", JSON.stringify(j)); } catch (e) {}
+  } catch (e) {
+    try { j = JSON.parse(localStorage.getItem("dq_cache")); } catch (e2) {}
+  }
+  const arr = Array.isArray(j) ? j : (j && j.questions) || [];
+  DATA = arr.filter((d) => d && d.q && d.a).map((d) => {
+    const nq = norm(d.q), na = norm(d.a), nkw = norm(d.kw);
+    return { ...d, nq, na, nkw, n: nq + " " + na + " " + nkw, ini: ini(d.q), kwIni: ini(d.kw) };
+  }).sort((a, b) => (b.added || "").localeCompare(a.added || ""));
+  $("meta").textContent = DATA.length ? "Cập nhật: " + ((j && j.updated) || "không rõ") + " • " + DATA.length + " câu" : "Chưa có dữ liệu.";
+  const p = new URLSearchParams(location.search).get("q");
+  if (p) $("q").value = p;
+  render();
+}
 
-      countBadge.textContent = `${filtered.length} câu`;
-      resultList.innerHTML = filtered.map(item => `
-        <div class="bg-slate-800 border border-slate-700 p-4 rounded-2xl shadow">
-          ${item.kw ? `<span class="inline-block bg-blue-950 text-blue-300 text-xs px-2 py-0.5 rounded mb-1 font-semibold">🔑 Từ khóa: ${item.kw}</span>` : ''}
-          <p class="text-sm text-slate-200 mb-2">${item.q}</p>
-          <div class="bg-emerald-950/70 border border-emerald-600/50 text-emerald-300 px-3 py-2 rounded-xl font-bold text-sm">
-            👉 Chọn chữ: ${item.a}
-          </div>
-        </div>
-      `).join('');
-    }
+$("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { shown = PAGE; render(); }, 120); });
+$("more").onclick = () => { shown += PAGE; render(); };
 
-    searchInput.addEventListener('input', e => renderResults(e.target.value));
-    clearBtn.addEventListener('click', () => { searchInput.value = ''; renderResults(''); searchInput.focus(); });
-
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const rec = new SR();
-      rec.lang = 'vi-VN';
-      voiceBtn.addEventListener('click', () => { voiceBtn.classList.add('bg-red-600'); rec.start(); });
-      rec.onresult = e => { searchInput.value = e.results[0][0].transcript; renderResults(searchInput.value); };
-      rec.onend = () => voiceBtn.classList.remove('bg-red-600');
-    } else {
-      voiceBtn.style.display = 'none';
-    }
-
-    loadData();
-  </script>
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SR) {
+  const rec = new SR();
+  let on = false;
+  rec.lang = "vi-VN";
+  rec.interimResults = true;
+  rec.onresult = (e) => { $("q").value = Array.from(e.results).map((r) => r[0].transcript).join(" "); shown = PAGE; render(); };
+  rec.onend = rec.onerror = () => { on = false; $("mic").textContent = "🎤"; };
+  $("mic").onclick = () => {
+    try { if (on) rec.stop(); else { rec.start(); on = true; $("mic").textContent = "🔴"; } } catch (e) { on = false; }
+  };
+} else {
+  $("mic").style.display = "none";
+}
+load();
+</script>
 </body>
 </html>
