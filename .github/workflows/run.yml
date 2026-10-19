@@ -1,4 +1,3 @@
-# .github/workflows/run.yml
 name: Doan Quiz Bot
 
 on:
@@ -6,6 +5,11 @@ on:
     - cron: "30 0 * * *"   # 07:30 GMT+7
     - cron: "30 6 * * *"   # 13:30 GMT+7
   workflow_dispatch:
+    inputs:
+      scan_all:
+        description: "Quét tất cả cuộc thi 30 ngày gần nhất"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -17,7 +21,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +38,7 @@ jobs:
           FB_APPSTATE: ${{ secrets.FB_APPSTATE }}
           THREAD_ID: ${{ secrets.THREAD_ID }}
           WEB_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          SCAN_ALL: ${{ github.event.inputs.scan_all == 'true' }}
         run: node bot.js
 
       - name: Commit & push
@@ -41,12 +46,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data.json last_quiz.txt
+          for f in data.json last_quiz.txt; do [ -f "$f" ] && git add "$f"; done
           if git diff --cached --quiet; then
             echo "Không có thay đổi"
             exit 0
           fi
           git commit -m "chore: cập nhật đáp án $(TZ=Asia/Ho_Chi_Minh date +'%d/%m %H:%M')"
+          ok=0
           for i in 1 2 3; do
-            git pull --rebase origin "$GITHUB_REF_NAME" && git push && break || sleep 5
+            if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME"; then ok=1; break; fi
+            sleep 5
           done
+          [ "$ok" = "1" ] || { echo "Push thất bại sau 3 lần thử"; exit 1; }
