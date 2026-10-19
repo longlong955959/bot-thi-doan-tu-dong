@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tra Cứu Đáp Án Thi Đoàn - Chống Đảo Đề</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-4 font-sans">
+  <div class="max-w-xl mx-auto space-y-4">
+    <div class="bg-blue-600 p-4 rounded-2xl shadow-lg flex justify-between items-center">
+      <div>
+        <h1 class="text-lg font-bold">⚡ Tra Cứu Thi Đoàn (Chống Đảo Đề)</h1>
+        <p class="text-xs text-blue-200">Gõ 2-3 chữ trong câu hỏi để tìm đáp án ngay!</p>
+      </div>
+      <span id="countBadge" class="bg-blue-900 text-xs px-3 py-1 rounded-full font-bold">0 câu</span>
+    </div>
+
+    <div class="relative flex items-center">
+      <input id="searchInput" type="text" placeholder="Nhập từ khóa câu hỏi..." 
+        class="w-full p-4 pr-24 rounded-2xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-blue-500 text-base" />
+      <button id="clearBtn" class="hidden absolute right-14 text-slate-400 hover:text-white px-2">✕</button>
+      <button id="voiceBtn" class="absolute right-2 bg-blue-600 hover:bg-blue-500 p-2.5 rounded-xl text-white">🎤</button>
+    </div>
+
+    <div id="resultList" class="space-y-3"></div>
+  </div>
+
+  <script>
+    let questionBank = [];
+    const searchInput = document.getElementById('searchInput');
+    const resultList = document.getElementById('resultList');
+    const countBadge = document.getElementById('countBadge');
+    const clearBtn = document.getElementById('clearBtn');
+    const voiceBtn = document.getElementById('voiceBtn');
+
+    function removeTones(str) {
+      return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase();
+    }
+
+    async function loadData() {
+      try {
+        const res = await fetch('./data.json?t=' + Date.now());
+        questionBank = await res.json();
+        renderResults('');
+      } catch (e) {
+        resultList.innerHTML = '<p class="text-center text-slate-400">Đang cập nhật dữ liệu từ GitHub...</p>';
+      }
+    }
+
+    function renderResults(query = '') {
+      const cleanQuery = removeTones(query.trim());
+      clearBtn.classList.toggle('hidden', !query);
+
+      const filtered = questionBank.filter(item => {
+        const content = removeTones(`${item.kw || ''} ${item.q} ${item.a}`);
+        return cleanQuery.split(/\s+/).every(word => content.includes(word));
+      });
+
+      countBadge.textContent = `${filtered.length} câu`;
+      resultList.innerHTML = filtered.map(item => `
+        <div class="bg-slate-800 border border-slate-700 p-4 rounded-2xl shadow">
+          ${item.kw ? `<span class="inline-block bg-blue-950 text-blue-300 text-xs px-2 py-0.5 rounded mb-1 font-semibold">🔑 Từ khóa: ${item.kw}</span>` : ''}
+          <p class="text-sm text-slate-200 mb-2">${item.q}</p>
+          <div class="bg-emerald-950/70 border border-emerald-600/50 text-emerald-300 px-3 py-2 rounded-xl font-bold text-sm">
+            👉 Chọn chữ: ${item.a}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    searchInput.addEventListener('input', e => renderResults(e.target.value));
+    clearBtn.addEventListener('click', () => { searchInput.value = ''; renderResults(''); searchInput.focus(); });
+
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const rec = new SR();
+      rec.lang = 'vi-VN';
+      voiceBtn.addEventListener('click', () => { voiceBtn.classList.add('bg-red-600'); rec.start(); });
+      rec.onresult = e => { searchInput.value = e.results[0][0].transcript; renderResults(searchInput.value); };
+      rec.onend = () => voiceBtn.classList.remove('bg-red-600');
+    } else {
+      voiceBtn.style.display = 'none';
+    }
+
+    loadData();
+  </script>
+</body>
+</html>
